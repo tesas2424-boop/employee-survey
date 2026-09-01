@@ -1,0 +1,1 @@
+window.PulsePoint={toast(message,type='success'){const el=document.createElement('div');el.className=`alert alert-${type} position-fixed top-0 end-0 m-3 shadow`;el.style.zIndex=2000;el.textContent=message;document.body.appendChild(el);setTimeout(()=>el.remove(),3200)},csrf(){return document.querySelector('meta[name="csrf-token"]')?.content||''}};

@@ -1,0 +1,20 @@
+<?php
+require_once __DIR__.'/../includes/permissions.php'; require_once __DIR__.'/../includes/csrf.php'; require_once __DIR__.'/../includes/validation.php'; require_once __DIR__.'/../includes/audit.php';
+require_api_login();
+if($_SERVER['REQUEST_METHOD']==='GET'){
+ if(isset($_GET['id'])){ $s=db()->prepare('SELECT * FROM surveys WHERE id=?');$s->execute([(int)$_GET['id']]);$survey=$s->fetch(); if(!$survey)json_response(['ok'=>false,'message'=>'Survey not found'],404); $q=db()->prepare('SELECT * FROM survey_questions WHERE survey_id=? ORDER BY sort_order,id');$q->execute([$survey['id']]);$qs=$q->fetchAll(); foreach($qs as &$question){$o=db()->prepare('SELECT id,option_text,sort_order FROM question_options WHERE question_id=? ORDER BY sort_order,id');$o->execute([$question['id']]);$question['options']=$o->fetchAll();}$survey['questions']=$qs;json_response(['ok'=>true,'survey'=>$survey]); }
+ $rows=db()->query("SELECT s.*,u.name creator,(SELECT COUNT(*) FROM survey_responses r WHERE r.survey_id=s.id AND r.submitted_at IS NOT NULL) response_count FROM surveys s JOIN users u ON u.id=s.created_by ORDER BY s.created_at DESC")->fetchAll(); json_response(['ok'=>true,'surveys'=>$rows]);
+}
+require_permission('manage_surveys'); $d=json_input(); require_csrf($d['csrf_token']??null); $action=$d['action']??'';
+if($action==='save'){
+ $title=trim($d['title']??''); if(!$title)json_response(['ok'=>false,'message'=>'Survey title is required'],422); $pdo=db(); $pdo->beginTransaction();
+ try{
+  $id=(int)($d['id']??0); if($id){$s=$pdo->prepare('UPDATE surveys SET title=?,description=?,status=?,anonymous=?,starts_at=?,ends_at=? WHERE id=?');$s->execute([$title,$d['description']??null,$d['status']??'draft',(int)($d['anonymous']??1),$d['starts_at']?:null,$d['ends_at']?:null,$id]);$pdo->prepare('DELETE FROM survey_questions WHERE survey_id=?')->execute([$id]);}
+  else{$s=$pdo->prepare('INSERT INTO surveys(title,description,public_token,status,anonymous,starts_at,ends_at,created_by) VALUES(?,?,?,?,?,?,?,?)');$s->execute([$title,$d['description']??null,uuid_token(20),$d['status']??'draft',(int)($d['anonymous']??1),$d['starts_at']?:null,$d['ends_at']?:null,current_user()['id']]);$id=(int)$pdo->lastInsertId();}
+  foreach(($d['questions']??[]) as $i=>$q){$qt=trim($q['question_text']??'');$type=$q['question_type']??'';if(!$qt||!valid_question_type($type))continue;$st=$pdo->prepare('INSERT INTO survey_questions(survey_id,question_text,question_type,required,sort_order) VALUES(?,?,?,?,?)');$st->execute([$id,$qt,$type,(int)($q['required']??0),$i+1]);$qid=(int)$pdo->lastInsertId();if(in_array($type,['single','multiple','dropdown'],true)){foreach(($q['options']??[]) as $j=>$opt){$opt=trim($opt);if($opt==='')continue;$so=$pdo->prepare('INSERT INTO question_options(question_id,option_text,sort_order) VALUES(?,?,?)');$so->execute([$qid,$opt,$j+1]);}}}
+  $pdo->commit(); audit('save','survey',$id,['title'=>$title]); json_response(['ok'=>true,'id'=>$id]);
+ }catch(Throwable $e){$pdo->rollBack();json_response(['ok'=>false,'message'=>'Unable to save survey: '.$e->getMessage()],500);}
+}
+if($action==='delete'){ $id=(int)($d['id']??0); db()->prepare('DELETE FROM surveys WHERE id=?')->execute([$id]);audit('delete','survey',$id);json_response(['ok'=>true]); }
+if($action==='invite'){ $id=(int)($d['id']??0);$emails=preg_split('/[\s,;]+/',trim($d['emails']??''),-1,PREG_SPLIT_NO_EMPTY);$created=[];foreach($emails as $email){if(!filter_var($email,FILTER_VALIDATE_EMAIL))continue;$token=uuid_token(20);$s=db()->prepare('INSERT INTO survey_invitations(survey_id,email,invite_token,sent_at) VALUES(?,?,?,NOW()) ON DUPLICATE KEY UPDATE sent_at=NOW()');$s->execute([$id,$email,$token]);$created[]=['email'=>$email,'link'=>app_url('public/survey.php?invite='.$token)];}json_response(['ok'=>true,'invitations'=>$created,'message'=>'Invitation links generated. Configure SMTP/mail delivery in your host to send automatically.']); }
+json_response(['ok'=>false,'message'=>'Unsupported action'],400);
